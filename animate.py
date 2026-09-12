@@ -2,6 +2,8 @@
 
 Usage:
     python animate.py path\\to\\clip.mp4 --shorts --genre football --about "Manchester United, Cunha goal"
+    python animate.py --list-packs
+    python animate.py --list-styles
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ import sys
 
 import engine
 import metadata
+import packs
+import styles
 
 
 def _load_env() -> None:
@@ -28,15 +32,36 @@ def _load_env() -> None:
             os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
 
+def _unique_path(path: str) -> str:
+    if not os.path.isfile(path):
+        return path
+    root, ext = os.path.splitext(path)
+    n = 2
+    while os.path.isfile(f"{root}_{n}{ext}"):
+        n += 1
+    return f"{root}_{n}{ext}"
+
+
 def main() -> int:
     _load_env()
     ap = argparse.ArgumentParser(
         description="Animate a clip and write YouTube title / description / tags.")
-    ap.add_argument("clip", help="path to a local video (mp4/mov/webm/…)")
-    ap.add_argument("--style", choices=engine.STYLES, default="cartoon")
+    ap.add_argument("clip", nargs="?", help="path to a local video (mp4/mov/webm/…)")
+    ap.add_argument("--style", default="auto",
+                    choices=("auto",) + engine.STYLES,
+                    help="drawing look. auto picks a new one every run")
+    ap.add_argument("--pack", default="auto",
+                    choices=("auto",) + packs.PACK_NAMES,
+                    help="motion recipe. auto = real-time only (no slow-mo/whoosh)")
+    ap.add_argument("--list-packs", action="store_true",
+                    help="print motion packs and exit")
+    ap.add_argument("--list-styles", action="store_true",
+                    help="print drawing styles and exit")
     ap.add_argument("--drama", choices=engine.DRAMA, default="high")
     ap.add_argument("--shorts", action="store_true", help="9:16 1080x1920")
     ap.add_argument("--keep-speed", action="store_true")
+    ap.add_argument("--sfx", action="store_true",
+                    help="add trailer booms/rumble (off: keep the clip's own audio)")
     ap.add_argument("--max-seconds", type=float)
     ap.add_argument("--title", default="", help="on-screen label in the video")
     ap.add_argument("--out", default="", help="output mp4 path")
@@ -51,21 +76,41 @@ def main() -> int:
                     help="fail if the LLM is not configured instead of using a local fallback")
     args = ap.parse_args()
 
+    if args.list_packs:
+        print(packs.list_packs())
+        return 0
+    if args.list_styles:
+        print(styles.list_styles())
+        return 0
+    if not args.clip:
+        ap.error("clip is required (or pass --list-packs / --list-styles)")
+
     src = args.clip
     if not os.path.isfile(src):
         print(f"File not found: {src}")
         return 1
 
+    look = packs.resolve(
+        args.style, args.pack, src, engine.STATE_PATH, engine.STYLES)
+    audio = "sfx" if args.sfx else "source"
+    print(f"This run: {look.summary()}  audio={audio}")
+
     os.makedirs(engine.OUT_DIR, exist_ok=True)
     base = os.path.splitext(os.path.basename(src))[0]
     suffix = "short" if args.shorts else "animated"
-    out = args.out or os.path.join(engine.OUT_DIR, f"{base}_{args.style}_{suffix}.mp4")
+    out = args.out or os.path.join(
+        engine.OUT_DIR, f"{base}_{look.style}_{look.pack}_{suffix}.mp4")
+    if not args.out:
+        out = _unique_path(out)
 
     result = engine.render_clip(
         src, out,
-        style=args.style, drama=args.drama, shorts=args.shorts,
-        max_seconds=args.max_seconds, keep_speed=args.keep_speed, title=args.title,
+        look=look, drama=args.drama, shorts=args.shorts,
+        max_seconds=args.max_seconds, keep_speed=args.keep_speed,
+        title=args.title, audio=audio,
     )
+    style = result.get("style") or look.style
+    pack = result.get("pack") or look.pack
 
     facts = {
         "genre": args.genre,
@@ -74,7 +119,8 @@ def main() -> int:
         "player": args.player,
         "moment": args.moment,
         "extra": args.extra,
-        "style": args.style,
+        "style": style,
+        "pack": pack,
         "shorts": args.shorts,
         "duration": result["duration"],
         "on_screen_title": args.title,
@@ -92,7 +138,10 @@ def main() -> int:
         "facts": {k: v for k, v in facts.items() if v not in ("", None, False)},
         "video": os.path.abspath(out),
         "source_clip": os.path.abspath(src),
-        "style": args.style,
+        "style": style,
+        "pack": pack,
+        "look": result.get("look") or look.as_dict(),
+        "audio": audio,
         "drama": args.drama,
         "shorts": args.shorts,
         "duration": result["duration"],
@@ -104,6 +153,7 @@ def main() -> int:
 
     print(f"Done -> {out}")
     print(f"Metadata -> {meta_path}")
+    print(f"Look: {look.summary()}   audio={audio}")
     print(f"Title: {yt['title']}")
     print(f"Tags: {yt['tags_csv']}")
     return 0

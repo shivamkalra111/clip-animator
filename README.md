@@ -49,8 +49,8 @@ python animate.py path\to\clip.mp4 --shorts `
 
 Output:
 
-- `out/<name>_cartoon_short.mp4` — the recut
-- `out/<name>_cartoon_short.json` — `title`, `description`, `tags`, `tags_csv` (paste into YouTube)
+- `out/<name>_<style>_<pack>_short.mp4` — the recut (a new look every run)
+- `out/<name>_<style>_<pack>_short.json` — `title`, `description`, `tags`, `tags_csv` (paste into YouTube)
 
 ### Example (Cunha Short)
 
@@ -58,12 +58,53 @@ Output:
 python animate.py "C:\Users\User\Downloads\the-cunha-surf-is-back-1920-ytshorts.savetube.me.mp4" --shorts --genre football --about "Manchester United, Matheus Cunha, the surf is back" --player "Matheus Cunha" --teams "Manchester United" --moment "Cunha surf celebration" --title "THE CUNHA SURF IS BACK"
 ```
 
+## Variety (new look every run)
+
+`--style auto` (default) picks a **new drawing look every run**. `--pack auto` picks a **real-time** motion recipe only — no slow-mo, freeze-frame, or whoosh. The clip’s own audio is copied at normal speed.
+
+Slow-mo / freeze / whoosh packs are opt-in: `--pack trailer`, `--pack freeze`, `--pack replay`, or `--pack strobe`. `--sfx` adds trailer booms on top.
+
+Drawing styles (32 looks; `python animate.py --list-styles`):
+`cartoon`, `comic`, `paint`, `neon`, `sketch`, `pop`, `mono`, `duo`, `anime`, `watercolor`, `oil`, `halftone`, `pixel`, `noir`, `thermal`, `vapor`, `ink`, `chalk`, `poster`, `ice`, `ember`, `holo`, `sepia`, `blueprint`, `matrix`, `glass`, `pastel`, `scan`, `riso`, `sunset`, `night`, `manga`.
+
+Motion packs:
+
+| Pack | What you see |
+|------|----------------|
+| `live` | Real-time, style only (default auto pool) |
+| `drift` | Slow Ken Burns push-in, no time-warp |
+| `whip` | Whip-pan blurs between beats |
+| `panels` | Comic-book split panels on peaks |
+| `smash` | Peak zoom + shake, still real-time |
+| `glitch` | RGB split on hits, still real-time |
+| `impact` | Impact burst on hits, still real-time |
+| `trailer` | Slow-mo punch-ins + speed lines (opt-in) |
+| `freeze` | Freeze-frame hold on the peak (opt-in) |
+| `replay` | Instant replay of the biggest hit (opt-in) |
+| `strobe` | Stutter frames on hits (opt-in) |
+
+Each run also randomizes overlay ink, hue, grain, and line style.
+
+```powershell
+python animate.py --list-packs
+python animate.py --list-styles
+python animate.py path\to\clip.mp4 --shorts
+python animate.py path\to\clip.mp4 --shorts --pack freeze --style comic
+python animate.py path\to\clip.mp4 --shorts --pack trailer --sfx   # slow-mo + booms
+```
+
+Output files are named `out/<clip>_<style>_<pack>_short.mp4`. A second run that lands on the same names gets `_2` so nothing is overwritten.
+
 ## Flags
 
 | Flag | What it does |
 |------|----------------|
-| `--style cartoon\|comic\|paint\|neon` | Drawing style (default `cartoon`) |
-| `--drama low\|medium\|high` | Slow-mo / punch-in strength (default `high`) |
+| `--style auto\|<name>` | Drawing look (32 styles, default `auto`, new every run). See `--list-styles` |
+| `--pack auto\|live\|…` | Motion recipe. `auto` = real-time only. Slow-mo packs are opt-in (`trailer`, `freeze`, `replay`, `strobe`) |
+| `--list-packs` | Print motion packs and exit |
+| `--list-styles` | Print drawing styles and exit |
+| `--sfx` | Mix trailer booms/rumble (default is keep source audio) |
+| `--drama low\|medium\|high` | Effect strength (default `high`) |
 | `--shorts` | 1080×1920 cover-crop |
 | `--max-seconds N` | Only the first N seconds of the source |
 | `--keep-speed` | Stylize only, no time-warp |

@@ -1,4 +1,4 @@
-"""Video engine: cartoon / comic / paint / neon restyle + dramatic recut.
+"""Video engine: restyle + motion-pack recut.
 
 Used by animate.py. Do not run this file directly.
 """
@@ -12,6 +12,9 @@ import subprocess
 import wave
 
 import numpy as np
+
+import packs
+import styles
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -34,8 +37,9 @@ WIN_FONTS = [
     r"C:\Windows\Fonts\arialbd.ttf",
     r"C:\Windows\Fonts\arial.ttf",
 ]
-STYLES = ("cartoon", "comic", "paint", "neon")
+STYLES = styles.NAMES
 DRAMA = ("low", "medium", "high")
+STATE_PATH = os.path.join(OUT_DIR, ".tooncut_last.json")
 
 
 def _font_path() -> str:
@@ -200,49 +204,7 @@ def quantize(img: np.ndarray, steps: int) -> np.ndarray:
 
 
 def stylize_bgr(frame: np.ndarray, style: str) -> np.ndarray:
-    h, w = frame.shape[:2]
-    scale = 640.0 / max(h, w)
-    if scale < 1.0:
-        work = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    else:
-        work = frame
-    if style == "paint":
-        painted = cv2.stylization(work, sigma_s=45, sigma_r=0.35)
-        out = painted
-    elif style == "neon":
-        gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 70, 160)
-        edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
-        glow = cv2.GaussianBlur(edges, (0, 0), 2.4)
-        dark = (work.astype(np.float32) * 0.22).astype(np.uint8)
-        color_edge = np.zeros_like(work)
-        color_edge[:, :, 0] = glow  # blue-ish
-        color_edge[:, :, 1] = (glow * 0.55).astype(np.uint8)
-        color_edge[:, :, 2] = np.clip(edges.astype(np.uint16) + glow * 0.4, 0, 255).astype(np.uint8)
-        out = cv2.add(dark, color_edge)
-    else:
-        color = work
-        for _ in range(2):
-            color = cv2.bilateralFilter(color, 7, 55, 55)
-        steps = 12 if style == "comic" else 18
-        color = quantize(color, steps)
-        gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-        gray = cv2.medianBlur(gray, 5)
-        blk = 5 if style == "comic" else 7
-        c = 3 if style == "comic" else 2
-        edges = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, blk, c)
-        if style == "comic":
-            edges = cv2.erode(edges, np.ones((2, 2), np.uint8), iterations=1)
-        edges_bgr = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        out = cv2.bitwise_and(color, edges_bgr)
-        hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.55 if style == "comic" else 1.38), 0, 255)
-        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.10, 0, 255)
-        out = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    if out.shape[0] != h or out.shape[1] != w:
-        out = cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR)
-    return out
+    return styles.apply(frame, style)
 
 
 def cover_crop(img: np.ndarray, tw: int, th: int, cx: float, cy: float, zoom: float) -> np.ndarray:
@@ -277,6 +239,29 @@ def make_speed_lines(h: int, w: int) -> np.ndarray:
     lines = spokes * ring
     lines = cv2.GaussianBlur(lines, (0, 0), 1.2)
     return np.clip(lines, 0, 1)
+
+
+def make_diagonal_lines(h: int, w: int) -> np.ndarray:
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    stripe = (np.sin((xx + yy) * 0.085) > 0.72).astype(np.float32)
+    return np.clip(cv2.GaussianBlur(stripe, (0, 0), 1.1), 0, 1)
+
+
+def make_cross_lines(h: int, w: int) -> np.ndarray:
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    a = (np.sin((xx - yy) * 0.07) > 0.78).astype(np.float32)
+    b = (np.sin((xx + yy) * 0.07) > 0.78).astype(np.float32)
+    return np.clip(cv2.GaussianBlur(np.maximum(a, b), (0, 0), 1.0), 0, 1)
+
+
+def line_field(kind: str, h: int, w: int) -> np.ndarray:
+    if kind == "diagonal":
+        return make_diagonal_lines(h, w)
+    if kind == "cross":
+        return make_cross_lines(h, w)
+    if kind == "none":
+        return np.zeros((h, w), dtype=np.float32)
+    return make_speed_lines(h, w)
 
 
 def grade(bgr: np.ndarray, vignette: np.ndarray, flash: float, lines: np.ndarray, line_amt: float) -> np.ndarray:
@@ -321,25 +306,73 @@ def surf_rgba(surf: pygame.Surface) -> np.ndarray:
     return np.transpose(rgba, (1, 0, 2))
 
 
-def build_overlays(width: int, height: int, title: str, logo: pygame.Surface | None):
+def build_overlays(width: int, height: int, title: str, logo: pygame.Surface | None,
+                   kicker: str, stamp: str, ink: tuple[int, int, int] = ORANGE):
     pygame.font.init()
     font_big = load_font(int(height * 0.07))
     font_sub = load_font(int(height * 0.028))
+    font_tag = load_font(int(height * 0.032))
     title_s = pygame.Surface((width, int(height * 0.22)), pygame.SRCALPHA)
     bar = pygame.Surface((width, int(height * 0.16)), pygame.SRCALPHA)
     bar.fill((0, 0, 0, 150))
     title_s.blit(bar, (0, int(height * 0.03)))
-    t = font_big.render("ANIMATED REPLAY", True, ORANGE)
+    t = font_big.render(kicker[:22], True, ink)
     title_s.blit(t, t.get_rect(center=(width // 2, int(height * 0.085))))
     s = font_sub.render(title[:80], True, WHITE)
     title_s.blit(s, s.get_rect(center=(width // 2, int(height * 0.145))))
     caption_s = pygame.Surface((width, int(height * 0.08)), pygame.SRCALPHA)
-    cap = font_sub.render("DRAMATIC CUT", True, (230, 230, 230))
+    cap = font_sub.render(stamp[:22], True, (230, 230, 230))
     caption_s.blit(cap, cap.get_rect(center=(width // 2, int(height * 0.04))))
+
+    replay_s = pygame.Surface((int(width * 0.36), int(height * 0.07)), pygame.SRCALPHA)
+    pygame.draw.rect(replay_s, (0, 0, 0, 180), replay_s.get_rect(), border_radius=10)
+    pygame.draw.circle(replay_s, ink, (int(height * 0.028), int(height * 0.035)), 8)
+    rp = font_tag.render("REPLAY", True, ink)
+    replay_s.blit(rp, rp.get_rect(midleft=(int(height * 0.05), int(height * 0.035))))
+
+    freeze_s = pygame.Surface((int(width * 0.62), int(height * 0.09)), pygame.SRCALPHA)
+    pygame.draw.rect(freeze_s, (0, 0, 0, 170), freeze_s.get_rect(), border_radius=14)
+    pygame.draw.rect(freeze_s, ink, freeze_s.get_rect(), width=4, border_radius=14)
+    fz = font_tag.render(stamp[:18] or "HOLD", True, ink)
+    freeze_s.blit(fz, fz.get_rect(center=freeze_s.get_rect().center))
+
     logo_rgba = None
     if logo is not None:
         logo_rgba = surf_rgba(logo)
-    return surf_rgba(title_s), surf_rgba(caption_s), logo_rgba
+    return {
+        "title": surf_rgba(title_s),
+        "stamp": surf_rgba(caption_s),
+        "replay": surf_rgba(replay_s),
+        "freeze": surf_rgba(freeze_s),
+        "logo": logo_rgba,
+    }
+
+
+def mux_original_audio(tmp_video: str, src: str, out_video: str, duration: float) -> bool:
+    """Copy the clip's soundtrack at 1x. No warp, no whoosh, no booms."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", tmp_video,
+        "-i", src,
+        "-t", f"{duration:.3f}",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-shortest",
+        out_video,
+    ]
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode == 0 and os.path.isfile(out_video) and os.path.getsize(out_video) > 2048
+
+
+def source_audio(pcm: np.ndarray, sr: int, src_times: np.ndarray, out_fps: float) -> np.ndarray:
+    """Keep the clip's own soundtrack, time-mapped to the edit. No trailer SFX."""
+    out = warp_audio(pcm, sr, src_times, out_fps) if len(pcm) > sr // 20 else np.zeros(
+        int(len(src_times) / out_fps * sr), dtype=np.float32)
+    peak = float(np.max(np.abs(out))) or 1.0
+    if peak > 0.99:
+        out = out / peak * 0.97
+    return out.astype(np.float32)
 
 
 def warp_audio(pcm: np.ndarray, sr: int, src_times: np.ndarray, out_fps: float) -> np.ndarray:
@@ -355,24 +388,23 @@ def warp_audio(pcm: np.ndarray, sr: int, src_times: np.ndarray, out_fps: float) 
 
 
 def dramatic_audio(pcm: np.ndarray, sr: int, src_times: np.ndarray, out_fps: float,
-                   peaks: list[float], drama: str) -> np.ndarray:
+                   peaks: list[float], drama: str, audio_mode: str = "boom") -> np.ndarray:
     out = warp_audio(pcm, sr, src_times, out_fps) if len(pcm) > sr // 10 else np.zeros(
         int(len(src_times) / out_fps * sr), dtype=np.float32)
     n = len(out)
     t = np.arange(n) / sr
     rng = np.random.default_rng(11)
-    # trailer rumble
+    rumble_amt = {"boom": 1.0, "whoosh": 0.45, "stutter": 0.35, "dry": 0.15}.get(audio_mode, 1.0)
     rumble = (np.sin(2 * math.pi * 48 * t) * 0.08 + np.sin(2 * math.pi * 73 * t) * 0.04)
-    rumble *= 0.55 + 0.45 * np.sin(2 * math.pi * 0.35 * t)
+    rumble *= (0.55 + 0.45 * np.sin(2 * math.pi * 0.35 * t)) * rumble_amt
     noise = rng.standard_normal(n).astype(np.float32)
-    # crude lowpass
     k = np.ones(64, dtype=np.float32) / 64.0
-    whoosh = np.convolve(noise, k, mode="same") * 0.12
-    mixed = out * (0.78 if drama == "high" else 0.88) + rumble + whoosh
-    # map output time -> nearest source peak, then boom at corresponding out t
+    whoosh_amt = 0.22 if audio_mode == "whoosh" else 0.12
+    whoosh = np.convolve(noise, k, mode="same") * whoosh_amt
+    src_mix = 0.90 if audio_mode == "dry" else (0.78 if drama == "high" else 0.88)
+    mixed = out * src_mix + rumble + whoosh
     frame_t = np.arange(len(src_times)) / out_fps
     for p in peaks:
-        # output time when source time is nearest p
         j = int(np.argmin(np.abs(src_times - p)))
         t0 = frame_t[j]
         i0 = int(t0 * sr)
@@ -381,10 +413,17 @@ def dramatic_audio(pcm: np.ndarray, sr: int, src_times: np.ndarray, out_fps: flo
             continue
         tt = np.arange(ln) / sr
         env = np.exp(-tt * 7.5)
+        if audio_mode == "dry":
+            mixed[i0:i0 + ln] *= (0.88 + 0.12 * (1 - env))
+            continue
+        if audio_mode == "stutter":
+            click = np.sin(2 * math.pi * 180 * tt) * np.exp(-tt * 28) * 0.55
+            mixed[i0:i0 + ln] += click
+            mixed[i0:i0 + min(ln, int(0.04 * sr))] *= 0.15
+            continue
         boom = np.sin(2 * math.pi * (70 * np.exp(-tt * 8) + 38) * tt) * env
         mixed[i0:i0 + ln] += boom * (0.85 if drama == "high" else 0.5)
         mixed[i0:i0 + ln] += rng.uniform(-1, 1, ln).astype(np.float32) * np.exp(-tt * 18) * 0.25
-        # duck original slightly under the hit
         mixed[i0:i0 + ln] *= (0.72 + 0.28 * (1 - env))
     peak = float(np.max(np.abs(mixed))) or 1.0
     return np.tanh(mixed / peak * 1.15).astype(np.float32)
@@ -394,13 +433,22 @@ def render_clip(
     src: str,
     out_video: str,
     *,
-    style: str = "cartoon",
+    style: str = "auto",
+    pack: str = "auto",
     drama: str = "high",
     shorts: bool = False,
     max_seconds: float | None = None,
     keep_speed: bool = False,
     title: str = "",
+    audio: str = "source",
+    look: packs.Look | None = None,
 ) -> dict:
+    if look is None:
+        look = packs.resolve(style, pack, src, STATE_PATH, STYLES)
+    style = look.style
+    pack_name = look.pack
+    recipe = packs.get(pack_name)
+
     meta = probe(src)
     max_s = float(max_seconds) if max_seconds else float(meta["duration"])
     max_s = min(max_s, float(meta["duration"]))
@@ -411,24 +459,31 @@ def render_clip(
     print("Scanning motion...")
     times, energy, centroids = motion_profile(src, meta["fps"], max_s)
     peaks = [] if keep_speed or drama == "low" else find_peaks(times, energy)
-    if keep_speed:
-        src_times = np.arange(0, max_s, 1.0 / out_fps, dtype=np.float32)
-    else:
-        src_times = build_src_times(max_s, out_fps, peaks, drama)
-    print(f"Style={style}  drama={drama}  peaks={len(peaks)}  out={len(src_times)/out_fps:.1f}s")
+    beats = packs.build_beats(
+        recipe, max_s, out_fps, peaks, times, energy, drama, keep_speed)
+    src_times = np.array([b.t for b in beats], dtype=np.float32)
+    print(
+        f"Look: {look.summary()}  drama={drama}  audio={audio}  "
+        f"peaks={len(peaks)}  out={len(beats)/out_fps:.1f}s"
+    )
 
     pygame.init()
     pygame.font.init()
     pygame.display.set_mode((1, 1))
     logo = None
-    logo_path = os.path.join(HERE, "brand", "logo_circle.png")
-    if os.path.isfile(logo_path):
-        raw = pygame.image.load(logo_path).convert_alpha()
-        logo = pygame.transform.smoothscale(raw, (72, 72))
+    for logo_path in (
+        os.path.join(HERE, "brand", "logo_circle.png"),
+        os.path.join(HERE, "branding", "tooncut-youtube-profile.png"),
+    ):
+        if os.path.isfile(logo_path):
+            raw = pygame.image.load(logo_path).convert_alpha()
+            logo = pygame.transform.smoothscale(raw, (72, 72))
+            break
     label = title or os.path.splitext(os.path.basename(src))[0].replace("_", " ")
-    title_ov, cap_ov, logo_rgba = build_overlays(out_w, out_h, label, logo)
+    ov = build_overlays(out_w, out_h, label, logo, look.kicker, look.stamp, look.ink)
     vignette = make_vignette(out_h, out_w)
-    lines = make_speed_lines(out_h, out_w)
+    lines = line_field(look.line_kind, out_h, out_w)
+    rng = np.random.default_rng(7)
 
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
@@ -462,42 +517,56 @@ def render_clip(
          "-pix_fmt", "yuv420p", tmp],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    if ff.stdin is None:
+        raise SystemExit("ffmpeg failed to start")
 
-    n = len(src_times)
-    for i, t_src in enumerate(src_times):
-        fr = frame_at(float(t_src))
-        styled = stylize_bgr(fr, style)
-        e = float(np.interp(t_src, times, energy))
-        cx = float(np.interp(t_src, times, centroids[:, 0]))
-        cy = float(np.interp(t_src, times, centroids[:, 1]))
-        zoom = 1.0
-        flash = 0.0
-        if drama != "low":
-            zoom = 1.0 + (0.22 if drama == "high" else 0.12) * e
-            near = 0.0
-            for p in peaks:
-                d = abs(float(t_src) - p)
-                if d < 0.16:
-                    near = max(near, 1.0 - d / 0.16)
-            flash = near * (0.55 if drama == "high" else 0.3)
-        canvas = cover_crop(styled, out_w, out_h, cx, cy, zoom)
-        line_amt = (0.55 if drama == "high" else 0.28) * max(0.0, e - 0.35) if drama != "low" else 0.0
-        canvas = grade(canvas, vignette, flash, lines, line_amt)
-        # cinematic letterbox
-        if drama != "low" and not shorts:
-            bar = int(out_h * (0.09 if drama == "high" else 0.06))
-            canvas[:bar] = (4, 4, 6)
-            canvas[-bar:] = (4, 4, 6)
-        elif shorts and drama != "low":
-            bar = int(out_h * 0.04)
+    n = len(beats)
+    lb = recipe.letterbox if drama != "low" else 0.0
+    if not shorts and lb > 0:
+        lb = max(lb, 0.06 if drama == "medium" else 0.09)
+    for i, beat in enumerate(beats):
+        styled = stylize_bgr(frame_at(beat.t), style)
+        cx = float(np.interp(beat.t, times, centroids[:, 0])) + beat.pan_x
+        cy = float(np.interp(beat.t, times, centroids[:, 1])) + beat.pan_y
+        cx = min(0.92, max(0.08, cx))
+        cy = min(0.92, max(0.08, cy))
+        canvas = cover_crop(styled, out_w, out_h, cx, cy, beat.zoom)
+        if beat.panel:
+            alt = stylize_bgr(frame_at(max(0.0, beat.t - 0.42)), style)
+            alt_c = cover_crop(alt, out_w, out_h, cx, cy, 1.08)
+            canvas = packs.compose_panels(canvas, alt_c, shorts)
+        if beat.whip > 0.08:
+            canvas = packs.apply_whip(canvas, beat.whip)
+        if beat.glitch > 0.05:
+            canvas = packs.apply_glitch(canvas, beat.glitch, rng)
+        elif beat.chroma > 0.05:
+            canvas = packs.apply_chroma(canvas, beat.chroma)
+        if beat.impact > 0.08:
+            canvas = packs.apply_impact(canvas, beat.impact, lines)
+        if beat.shake > 0.05:
+            canvas = packs.apply_shake(canvas, beat.shake, i)
+        canvas = packs.grade(canvas, recipe, vignette, beat.flash, lines, beat.lines)
+        canvas = packs.apply_look(canvas, look, rng)
+        if lb > 0.001:
+            bar = int(out_h * lb)
             canvas[:bar] = (4, 4, 6)
             canvas[-bar:] = (4, 4, 6)
         u = i / max(n - 1, 1)
-        if u < 0.12:
-            overlay_rgba(canvas, title_ov, 0, 0)
-        overlay_rgba(canvas, cap_ov, 0, out_h - cap_ov.shape[0] - 12)
-        if logo_rgba is not None:
-            overlay_rgba(canvas, logo_rgba, out_w - logo_rgba.shape[1] - 18, out_h - logo_rgba.shape[0] - 18)
+        if u < recipe.title_u:
+            overlay_rgba(canvas, ov["title"], 0, 0)
+        if beat.replay:
+            overlay_rgba(canvas, ov["replay"], 18, int(out_h * 0.07))
+        if beat.freeze:
+            fz = ov["freeze"]
+            overlay_rgba(canvas, fz, (out_w - fz.shape[1]) // 2, int(out_h * 0.12))
+        elif packs.show_stamp(recipe, beat, beat.flash > 0.18 or beat.impact > 0.4):
+            overlay_rgba(canvas, ov["stamp"], 0, out_h - ov["stamp"].shape[0] - 12)
+        if ov["logo"] is not None:
+            overlay_rgba(
+                canvas, ov["logo"],
+                out_w - ov["logo"].shape[1] - 18,
+                out_h - ov["logo"].shape[0] - 18,
+            )
         ff.stdin.write(np.ascontiguousarray(canvas).tobytes())
         if i % 40 == 0:
             print(f"  {i+1}/{n} frames  ({100.0 * (i+1)/n:.0f}%)")
@@ -506,26 +575,45 @@ def render_clip(
     ff.wait()
     cap.release()
 
-    wav_in = out_video + ".src.wav"
-    wav_out = out_video + ".mix.wav"
-    has_src_audio = extract_audio(src, wav_in, max_s)
-    if has_src_audio:
-        pcm, sr = read_wav(wav_in)
-    else:
-        sr = 44100
-        pcm = np.zeros(int(max_s * sr), dtype=np.float32)
-    mixed = dramatic_audio(pcm, sr, src_times, out_fps, peaks, drama)
-    write_wav(wav_out, mixed, sr)
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", tmp, "-i", wav_out,
-         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-         "-shortest", out_video],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
-    )
-    for p in (tmp, wav_in, wav_out):
-        if os.path.isfile(p):
-            os.remove(p)
-
     duration = round(len(src_times) / out_fps, 2)
-    print(f"Rendered {duration:.1f}s  peaks={len(peaks)}")
-    return {"video": out_video, "duration": duration, "peaks": [round(p, 2) for p in peaks]}
+    use_orig = audio != "sfx" and (keep_speed or recipe.time_mode == "linear")
+    muxed = False
+    if use_orig and meta.get("has_audio"):
+        muxed = mux_original_audio(tmp, src, out_video, duration)
+
+    if not muxed:
+        wav_in = out_video + ".src.wav"
+        wav_out = out_video + ".mix.wav"
+        has_src_audio = extract_audio(src, wav_in, max_s)
+        if has_src_audio:
+            pcm, sr = read_wav(wav_in)
+        else:
+            sr = 44100
+            pcm = np.zeros(int(max_s * sr), dtype=np.float32)
+        if audio == "sfx":
+            mixed = dramatic_audio(pcm, sr, src_times, out_fps, peaks, drama, recipe.audio)
+        else:
+            mixed = source_audio(pcm, sr, src_times, out_fps)
+        write_wav(wav_out, mixed, sr)
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp, "-i", wav_out,
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+             "-shortest", out_video],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+        )
+        for p in (wav_in, wav_out):
+            if os.path.isfile(p):
+                os.remove(p)
+
+    if os.path.isfile(tmp):
+        os.remove(tmp)
+    print(f"Rendered {duration:.1f}s  {look.summary()}  peaks={len(peaks)}")
+    return {
+        "video": out_video,
+        "duration": duration,
+        "peaks": [round(p, 2) for p in peaks],
+        "style": style,
+        "pack": pack_name,
+        "look": look.as_dict(),
+        "audio": audio,
+    }
